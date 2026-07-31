@@ -1,4 +1,4 @@
-name: Sandbox Hermes Source Transfer
+name: Sandbox Hermes Runtime Transfer
 
 on:
   push:
@@ -17,16 +17,41 @@ jobs:
         with:
           repository: NousResearch/hermes-agent
           ref: v2026.7.30
-          path: hermes-agent-v2026.7.30
+          path: source
 
-      - name: Remove Git metadata
-        run: rm -rf hermes-agent-v2026.7.30/.git
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          enable-cache: false
 
-      - name: Upload source artifact
+      - name: Build relocatable Linux runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo rm -rf /opt/hermes-runtime
+          sudo mkdir -p /opt/hermes-runtime/hermes-agent
+          sudo cp -a source/. /opt/hermes-runtime/hermes-agent/
+          sudo rm -rf /opt/hermes-runtime/hermes-agent/.git
+          sudo chown -R "$USER:$USER" /opt/hermes-runtime
+
+          export UV_PYTHON_INSTALL_DIR=/opt/hermes-runtime/python
+          uv python install 3.11
+          uv venv /opt/hermes-runtime/venv --python 3.11
+          uv pip install \
+            --python /opt/hermes-runtime/venv/bin/python \
+            -e '/opt/hermes-runtime/hermes-agent[all,messaging]'
+
+          /opt/hermes-runtime/venv/bin/hermes --version
+          tar -C /opt -czf /tmp/hermes-runtime-v0.19.1-linux-x86_64.tar.gz hermes-runtime
+          sha256sum /tmp/hermes-runtime-v0.19.1-linux-x86_64.tar.gz | tee /tmp/hermes-runtime-v0.19.1-linux-x86_64.sha256
+          ls -lh /tmp/hermes-runtime-v0.19.1-linux-x86_64.tar.gz
+
+      - name: Upload portable runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: hermes-agent-v2026.7.30-source
-          path: hermes-agent-v2026.7.30
-          include-hidden-files: true
-          compression-level: 6
+          name: hermes-runtime-v0.19.1-linux-x86_64
+          path: |
+            /tmp/hermes-runtime-v0.19.1-linux-x86_64.tar.gz
+            /tmp/hermes-runtime-v0.19.1-linux-x86_64.sha256
+          compression-level: 0
           retention-days: 1
