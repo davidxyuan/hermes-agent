@@ -1,0 +1,32 @@
+name: Sandbox Hermes Source Transfer
+
+on:
+  push:
+    branches:
+      - sandbox/hermes-transfer-20260731-1824
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out official Hermes release
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: NousResearch/hermes-agent
+          ref: v2026.7.30
+          path: hermes-agent-v2026.7.30
+
+      - name: Remove Git metadata
+        run: rm -rf hermes-agent-v2026.7.30/.git
+
+      - name: Upload source artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hermes-agent-v2026.7.30-source
+          path: hermes-agent-v2026.7.30
+          include-hidden-files: true
+          compression-level: 6
+          retention-days: 1
