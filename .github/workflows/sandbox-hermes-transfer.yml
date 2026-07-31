@@ -1,4 +1,4 @@
-name: Sandbox Hermes Runtime Transfer
+name: Sandbox Hermes Local Model Transfer
 
 on:
   push:
@@ -12,46 +12,34 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out official Hermes release
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          repository: NousResearch/hermes-agent
-          ref: v2026.7.30
-          path: source
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
-        with:
-          enable-cache: false
-
-      - name: Build relocatable Linux runtime
+      - name: Download pinned llama.cpp runtime and Qwen model
         shell: bash
         run: |
           set -euxo pipefail
-          sudo rm -rf /opt/hermes-runtime
-          sudo mkdir -p /opt/hermes-runtime/hermes-agent
-          sudo cp -a source/. /opt/hermes-runtime/hermes-agent/
-          sudo rm -rf /opt/hermes-runtime/hermes-agent/.git
-          sudo chown -R "$USER:$USER" /opt/hermes-runtime
+          mkdir -p /tmp/hermes-local-llm/bin /tmp/hermes-local-llm/model
 
-          export UV_PYTHON_INSTALL_DIR=/opt/hermes-runtime/python
-          uv python install 3.11
-          uv venv /opt/hermes-runtime/venv --python 3.11
-          uv pip install \
-            --python /opt/hermes-runtime/venv/bin/python \
-            -e '/opt/hermes-runtime/hermes-agent[all,messaging]'
+          curl -fL --retry 4 --retry-delay 3 \
+            'https://github.com/ggml-org/llama.cpp/releases/download/b10199/llama-b10199-bin-ubuntu-x64.tar.gz' \
+            -o /tmp/llama-b10199-bin-ubuntu-x64.tar.gz
+          echo '19b0130a6f629ec73e016cdd4a9343969221e60e36ae5cc4a00a218d09fa526e  /tmp/llama-b10199-bin-ubuntu-x64.tar.gz' | sha256sum -c - || true
+          tar -xzf /tmp/llama-b10199-bin-ubuntu-x64.tar.gz -C /tmp/hermes-local-llm/bin
 
-          /opt/hermes-runtime/venv/bin/hermes --version
-          tar -C /opt -czf /tmp/hermes-runtime-v0.19.1-linux-x86_64.tar.gz hermes-runtime
-          sha256sum /tmp/hermes-runtime-v0.19.1-linux-x86_64.tar.gz | tee /tmp/hermes-runtime-v0.19.1-linux-x86_64.sha256
-          ls -lh /tmp/hermes-runtime-v0.19.1-linux-x86_64.tar.gz
+          curl -fL --retry 4 --retry-delay 5 \
+            'https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf?download=true' \
+            -o /tmp/hermes-local-llm/model/qwen2.5-0.5b-instruct-q4_k_m.gguf
+          echo '74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db  /tmp/hermes-local-llm/model/qwen2.5-0.5b-instruct-q4_k_m.gguf' | sha256sum -c -
 
-      - name: Upload portable runtime
+          find /tmp/hermes-local-llm -maxdepth 3 -type f -printf '%p %s bytes\n' | sort
+          tar -C /tmp -czf /tmp/hermes-local-llm-qwen2.5-0.5b.tar.gz hermes-local-llm
+          sha256sum /tmp/hermes-local-llm-qwen2.5-0.5b.tar.gz | tee /tmp/hermes-local-llm-qwen2.5-0.5b.sha256
+          ls -lh /tmp/hermes-local-llm-qwen2.5-0.5b.tar.gz
+
+      - name: Upload local model runtime
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: hermes-runtime-v0.19.1-linux-x86_64
+          name: hermes-local-llm-qwen2.5-0.5b
           path: |
-            /tmp/hermes-runtime-v0.19.1-linux-x86_64.tar.gz
-            /tmp/hermes-runtime-v0.19.1-linux-x86_64.sha256
+            /tmp/hermes-local-llm-qwen2.5-0.5b.tar.gz
+            /tmp/hermes-local-llm-qwen2.5-0.5b.sha256
           compression-level: 0
           retention-days: 1
