@@ -1,4 +1,4 @@
-name: Sandbox Hermes Qwen Coder Transfer
+name: Sandbox Hermes Qwen Coder Chunk Transfer
 
 on:
   push:
@@ -12,25 +12,54 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - name: Download pinned Qwen Coder model
+      - name: Download and split pinned Qwen Coder model
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p /tmp/hermes-qwen-coder-1.5b
+          mkdir -p /tmp/hermes-qwen-coder-chunks
           curl -fL --retry 5 --retry-delay 5 \
             'https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf?download=true' \
-            -o /tmp/hermes-qwen-coder-1.5b/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf
-          echo 'cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046  /tmp/hermes-qwen-coder-1.5b/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf' | sha256sum -c -
-          tar -C /tmp -cf /tmp/hermes-qwen-coder-1.5b.tar hermes-qwen-coder-1.5b
-          sha256sum /tmp/hermes-qwen-coder-1.5b.tar | tee /tmp/hermes-qwen-coder-1.5b.sha256
-          ls -lh /tmp/hermes-qwen-coder-1.5b.tar
+            -o /tmp/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf
+          echo 'cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046  /tmp/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf' | sha256sum -c -
+          split -b 400M -d -a 2 \
+            /tmp/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf \
+            /tmp/hermes-qwen-coder-chunks/model.part-
+          sha256sum /tmp/hermes-qwen-coder-chunks/model.part-* \
+            > /tmp/hermes-qwen-coder-chunks/chunks.sha256
+          printf 'cc324af070c2ecbfd324a30884d2f951a7ff756aba85cb811a6ec436933bb046  qwen2.5-coder-1.5b-instruct-q4_k_m.gguf\n' \
+            > /tmp/hermes-qwen-coder-chunks/model.sha256
+          ls -lh /tmp/hermes-qwen-coder-chunks
+          test "$(find /tmp/hermes-qwen-coder-chunks -name 'model.part-*' | wc -l)" -eq 3
 
-      - name: Upload Qwen Coder model
+      - name: Upload chunk 00
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: hermes-qwen-coder-1.5b
-          path: |
-            /tmp/hermes-qwen-coder-1.5b.tar
-            /tmp/hermes-qwen-coder-1.5b.sha256
+          name: hermes-qwen-coder-1.5b-part-00
+          path: /tmp/hermes-qwen-coder-chunks/model.part-00
           compression-level: 0
+          retention-days: 1
+
+      - name: Upload chunk 01
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hermes-qwen-coder-1.5b-part-01
+          path: /tmp/hermes-qwen-coder-chunks/model.part-01
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload chunk 02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hermes-qwen-coder-1.5b-part-02
+          path: /tmp/hermes-qwen-coder-chunks/model.part-02
+          compression-level: 0
+          retention-days: 1
+
+      - name: Upload checksum manifest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hermes-qwen-coder-1.5b-checksums
+          path: |
+            /tmp/hermes-qwen-coder-chunks/chunks.sha256
+            /tmp/hermes-qwen-coder-chunks/model.sha256
           retention-days: 1
