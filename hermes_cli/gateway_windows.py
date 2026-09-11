@@ -338,8 +338,10 @@ def _build_gateway_vbs_script(python_path: str, working_dir: str, hermes_home: s
     single hidden console — never shown, never CTRL_CLOSE'd at logon, and inherited by every
     console-subsystem descendant (git, gh, node, …) so none of them allocate a visible flashing conhost
     (#54220/#56747; the previous console-less pythonw.exe gateway forced exactly that per-descendant flash).
-    No cmd.exe anywhere in the chain. Mirrors ``_build_gateway_cmd_script`` (same env + argv via
-    ``_resolve_detached_python``).
+    The VBS intentionally waits for the gateway and supervises abnormal exits itself: exit code 0 ends
+    cleanly, while non-zero exits are retried after one minute. Task Scheduler's ``RestartOnFailure`` remains
+    a secondary guard for failures to launch the VBS action itself. No cmd.exe anywhere in the chain.
+    Mirrors ``_build_gateway_cmd_script`` (same env + argv via ``_resolve_detached_python``).
     """
     python_exe_path, venv_dir, extra_pythonpath = _resolve_detached_python(python_path)
     # list2cmdline gives CreateProcess-correct quoting for WScript.Shell.Run.
@@ -349,7 +351,7 @@ def _build_gateway_vbs_script(python_path: str, working_dir: str, hermes_home: s
     lines = [
         f"' {_TASK_DESCRIPTION}",
         "Option Explicit",
-        "Dim sh, env, existing_pp",
+        "Dim sh, env, existing_pp, exit_code, retry_count",
         'Set sh = CreateObject("WScript.Shell")',
         'Set env = sh.Environment("PROCESS")',
         f"env.Item({q('HERMES_HOME')}) = {q(hermes_home)}",
@@ -363,8 +365,19 @@ def _build_gateway_vbs_script(python_path: str, working_dir: str, hermes_home: s
         f"  env.Item({q('PYTHONPATH')}) = {q(static_pythonpath)}",
         "End If",
         f"sh.CurrentDirectory = {q(working_dir)}",
-        # Window style 0 = hidden; bWaitOnReturn False = detached/async.
-        f"sh.Run {q(command_line)}, 0, False",
+        # Window style 0 = hidden. Keep this VBS alive as the actual supervisor:
+        # Windows Task Scheduler does not reliably treat a successfully-launched
+        # Exec action's later non-zero child exit as a restartable task failure.
+        # A clean gateway exit (0) is intentional; abnormal exits are retried.
+        "retry_count = 0",
+        "Do",
+        f"  exit_code = sh.Run({q(command_line)}, 0, True)",
+        "  If exit_code = 0 Then Exit Do",
+        "  retry_count = retry_count + 1",
+        f"  If retry_count >= {_TASK_RESTART_COUNT} Then Exit Do",
+        "  WScript.Sleep 60000",
+        "Loop",
+        "WScript.Quit exit_code",
     ]
     return "\r\n".join(lines) + "\r\n"
 
