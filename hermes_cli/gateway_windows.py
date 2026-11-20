@@ -59,10 +59,8 @@ _LAST_SPAWN_BREAKAWAY_FALLBACK: dict = {"fallback": False}
 _TASK_NAME_DEFAULT = "Hermes_Gateway"
 _TASK_DESCRIPTION = "Hermes Agent Gateway - Messaging Platform Integration"
 _TASK_LOGON_DELAY = "PT30S"
-_TASK_RESTART_INTERVAL = "PT1M"
-_TASK_RESTART_COUNT = 999
 
-# Gateway exits the logon-task launcher reports as 0, so RestartOnFailure does not relaunch them every
+# Gateway exits the logon-task launcher reports as 0, so it does not relaunch them every
 # minute. 78 = fatal config (EX_CONFIG; systemd parks it with RestartPreventExitStatus). 1 is also an
 # uncaught crash, so it counts as a stop only while ``gateway.pid`` is still there: another gateway owns
 # the profile ("already running" never touches its record), or a CLI stop force-killed this one after
@@ -437,6 +435,8 @@ def _build_gateway_vbs_script(python_path: str, working_dir: str, hermes_home: s
     No cmd.exe anywhere in the chain. Mirrors ``_build_gateway_cmd_script`` (same env + argv via
     ``_resolve_detached_python``).
     """
+    from hermes_cli.gateway_runtime_service_identity import TASK_RETRY_BEGIN, TASK_RETRY_END
+
     python_exe_path, venv_dir, extra_pythonpath = _resolve_detached_python(python_path)
     # list2cmdline gives CreateProcess-correct quoting for WScript.Shell.Run.
     command_line = subprocess.list2cmdline(_gateway_run_argv(python_exe_path, profile_arg))
@@ -459,12 +459,12 @@ def _build_gateway_vbs_script(python_path: str, working_dir: str, hermes_home: s
         f"  env.Item({q('PYTHONPATH')}) = {q(static_pythonpath)}",
         "End If",
         f"sh.CurrentDirectory = {q(working_dir)}",
-        # Window style 0 = hidden; bWaitOnReturn True: wscript lives as long as the gateway and exits
-        # with its code, so the task's RestartOnFailure sees a gateway that died (#146976). A launcher
-        # that returned at once ended the task "successfully" before the gateway could ever fail.
+        # Task Scheduler can report the exit code without restarting a successfully launched action.
+        *TASK_RETRY_BEGIN,
         f"code = sh.Run({q(command_line)}, 0, True)",
         _LAUNCHER_FATAL_CONFIG_EXIT,
         _launcher_owned_exit_line(hermes_home),
+        *TASK_RETRY_END,
         "WScript.Quit code",
     ]
     return "\r\n".join(lines) + "\r\n"
@@ -644,15 +644,11 @@ def _build_scheduled_task_xml(task_name: str, launcher_path: Path, user: str | N
     <WakeToRun>false</WakeToRun>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <Priority>7</Priority>
-    <RestartOnFailure>
-      <Interval>{_TASK_RESTART_INTERVAL}</Interval>
-      <Count>{_TASK_RESTART_COUNT}</Count>
-    </RestartOnFailure>
   </Settings>
   <Actions Context="Author">
     <Exec>
       <Command>wscript.exe</Command>
-      <Arguments>//B //Nologo "{escape(str(launcher_path))}"</Arguments>
+      <Arguments>//B //Nologo "{escape(str(launcher_path))}" --retry-task</Arguments>
     </Exec>
   </Actions>
 </Task>
@@ -1532,7 +1528,6 @@ def _task_xml_leaf_values(xml: str) -> dict[str, str] | None:
 # template (#113670). Never a full-leaf compare: schtasks exports <UserId> as a SID while the template
 # writes DOMAIN\user, so equality would flag every healthy registration.
 _TASK_DRIFT_LEAVES = {
-    "Task/Settings/RestartOnFailure/Interval": "RestartOnFailure",
     "Task/Triggers/LogonTrigger/Delay": "LogonTrigger Delay",
     "Task/Actions/Exec/Arguments": "launcher arguments",
 }
@@ -1555,6 +1550,9 @@ def compare_scheduled_task_drift(registered_xml: str, template_xml: str) -> list
     if missing:
         drift.append(f"missing: {', '.join(missing)}")
     drift.extend(f"{label} differs" for label in differs)
+    restart = "Task/Settings/RestartOnFailure/Count"
+    if restart not in want and live.get(restart, "0") != "0":
+        drift.append("RestartOnFailure duplicates launcher retries")
     live_logon = live.get(_TASK_LOGON_TYPE_LEAF)
     if live_logon and live_logon != want.get(_TASK_LOGON_TYPE_LEAF):
         drift.append(f"LogonType {live_logon}")
@@ -1584,7 +1582,7 @@ def _print_scheduled_task_drift(task_name: str) -> None:
 
 def reconcile_scheduled_task(task_name: str) -> bool:
     """Re-register the task from the current template when it drifts (#113670) — the Windows sibling
-    of ``gateway.py::refresh_systemd_unit_if_needed``. Template hardening (``RestartOnFailure``, logon
+    of ``gateway.py::refresh_systemd_unit_if_needed``. Template hardening (launcher arguments, logon
     ``Delay``) otherwise only ever reaches fresh installs. False when aligned/unqueryable or when
     ``schtasks`` refused (typically Access Denied — the elevating ``hermes gateway install`` is the fallback)."""
     drift = scheduled_task_drift(task_name)

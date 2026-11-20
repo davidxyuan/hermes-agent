@@ -51,7 +51,7 @@ def test_registered_task_launchers_reads_each_hermes_task_action(monkeypatch):
     legacy = r"C:\Users\ann\h2\gateway-service\Hermes_Gateway.cmd"
     current = gateway_windows._build_scheduled_task_xml("Hermes_Gateway_work", Path(launcher), "PC\\ann")
     older = current.replace("<Command>wscript.exe</Command>", f"<Command>{legacy}</Command>").replace(
-        f'//B //Nologo "{launcher}"', "")
+        f'//B //Nologo "{launcher}" --retry-task', "")
     listing = ('\r\n"\\Microsoft\\Windows\\Defrag\\ScheduledDefrag","N/A","Ready"\r\n'
                '"\\Hermes_Gateway_work","N/A","Ready"\r\n"\\Hermes_Gateway","N/A","Running"\r\n')
     xml = {"Hermes_Gateway_work": current, "Hermes_Gateway": older}
@@ -357,8 +357,8 @@ def test_install_scheduled_task_recreates_instead_of_change(monkeypatch, tmp_pat
     assert "<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>" in xml_seen["text"]
     assert "<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>" in xml_seen["text"]
     assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml_seen["text"]
-    assert "<RestartOnFailure>" in xml_seen["text"]
-    assert "<Count>999</Count>" in xml_seen["text"]
+    assert "<RestartOnFailure>" not in xml_seen["text"]
+    assert '" --retry-task</Arguments>' in xml_seen["text"]
     # Scheduled Task launches the console-less .vbs via wscript.exe, never cmd.exe
     # (issue #45599 fix A: no console -> no logon CTRL_CLOSE_EVENT / 0xC000013A).
     assert "<Command>wscript.exe</Command>" in xml_seen["text"]
@@ -657,7 +657,7 @@ def test_scheduled_task_drift_names_missing_hardening_leaves(monkeypatch):
     template = gateway_windows._build_scheduled_task_xml("Hermes_Gateway", launcher, r"PC\me")
     drift = gateway_windows.compare_scheduled_task_drift(_PRE_HARDENING_TASK_XML, template)
     assert drift == [
-        "missing: RestartOnFailure, LogonTrigger Delay",
+        "missing: LogonTrigger Delay",
         "launcher arguments differs",
         "version 1.3 vs 1.4",
     ]
@@ -668,7 +668,7 @@ def test_scheduled_task_drift_names_missing_hardening_leaves(monkeypatch):
     monkeypatch.setattr(gateway_windows, "_resolve_task_user", lambda: r"PC\me")
     monkeypatch.setattr("builtins.print", lambda *a, **k: printed.append(" ".join(map(str, a))))
     gateway_windows._print_scheduled_task_drift("Hermes_Gateway")
-    assert printed[0].startswith("⚠ Scheduled Task registration predates the current template (missing: RestartOnFailure")
+    assert printed[0].startswith("⚠ Scheduled Task registration predates the current template (missing: LogonTrigger Delay")
     assert "hermes gateway install" in printed[1]
 
 
@@ -680,6 +680,8 @@ def test_scheduled_task_drift_is_silent_when_aligned_or_unqueryable(monkeypatch)
     exported = template.replace(r"<UserId>PC\me</UserId>", "<UserId>S-1-5-21-1-2-3-1001</UserId>")
     assert exported != template
     assert gateway_windows.compare_scheduled_task_drift(exported, template) == []
+    duplicate = exported.replace("</Settings>", "<RestartOnFailure><Count>999</Count></RestartOnFailure></Settings>")
+    assert gateway_windows.compare_scheduled_task_drift(duplicate, template) == ["RestartOnFailure duplicates launcher retries"]
     assert gateway_windows.compare_scheduled_task_drift("not xml", template) == []
 
     printed: list[str] = []
@@ -728,7 +730,7 @@ def test_scheduled_task_drift_flags_an_s4u_principal():
 
 def test_reconcile_scheduled_task_reregisters_only_on_drift(monkeypatch, tmp_path):
     """The Windows sibling of ``refresh_systemd_unit_if_needed`` (#113670): a pre-hardening
-    registration is deleted and re-created from the current template (so ``RestartOnFailure`` and the
+    registration is deleted and re-created from the current template (so launcher retries and the
     logon ``Delay`` reach existing installs), while an aligned one is left alone."""
     script_path = tmp_path / "gateway.cmd"
     launcher = script_path.with_suffix(".vbs")
@@ -752,7 +754,7 @@ def test_reconcile_scheduled_task_reregisters_only_on_drift(monkeypatch, tmp_pat
 
     assert gateway_windows.reconcile_scheduled_task("Hermes_Gateway") is True
     assert [c[0] for c in calls if c[0] in ("/Delete", "/Create")] == ["/Delete", "/Create"]
-    assert "<RestartOnFailure>" in registered["xml"]
+    assert '" --retry-task</Arguments>' in registered["xml"]
     assert gateway_windows.compare_scheduled_task_drift(registered["xml"], template) == []
 
     calls.clear()

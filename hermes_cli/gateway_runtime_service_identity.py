@@ -360,6 +360,15 @@ _LAUNCHER_TAIL = ('existing_pp = env.Item("PYTHONPATH")', 'If Len(existing_pp) >
 # _vbs_identity) and quits with the gateway's code.
 _WAITING_LAUNCHER_TAIL = (*_LAUNCHER_TAIL, "If code = 78 Then code = 0", None, "WScript.Quit code")
 
+# Only the scheduled action opts in. Startup-folder and direct launches still run once.
+TASK_LAUNCH_ATTEMPTS = 999
+TASK_RETRY_BEGIN = (
+    "Dim attempt, attempts", "attempts = 1", "If WScript.Arguments.Count = 1 Then",
+    f'  If WScript.Arguments(0) = "--retry-task" Then attempts = {TASK_LAUNCH_ATTEMPTS}',
+    "End If", "For attempt = 1 To attempts",
+)
+TASK_RETRY_END = ("If code = 0 Then Exit For", "If attempt < attempts Then WScript.Sleep 60000", "Next")
+
 
 def launcher_pid_file(hermes_home: str) -> str:
     """The ``gateway.pid`` the waiting launcher checks for an owned exit 1: ``gateway.status._get_pid_path``
@@ -367,16 +376,15 @@ def launcher_pid_file(hermes_home: str) -> str:
     return hermes_home.rstrip("\\/") + "\\gateway.pid"
 
 
-def _tail_mismatch(tail: list[str], waits: bool = False) -> int | None:
+def _tail_mismatch(tail: list[str], shape: tuple) -> int | None:
     """Offset of the first tail line that breaks the template's shape, or None when it holds."""
-    shape = _WAITING_LAUNCHER_TAIL if waits else _LAUNCHER_TAIL
     for offset, expected in enumerate(shape):
         if offset == len(tail) or expected not in (None, tail[offset]):
             return offset
     return len(shape) if len(tail) > len(shape) else None
 
 
-def _vbs_identity(script: str) -> tuple[str, list[str]]:
+def _vbs_identity(script: str, *, require_task_retry: bool = False) -> tuple[str, list[str]]:
     # Recognize the vendor's complete template, not a HERMES_HOME substring
     # inside an arbitrary executable script. Doubled quotes are VB literals.
     literal = r'"(?:[^"\r\n]|"")*"'
@@ -401,11 +409,21 @@ def _vbs_identity(script: str) -> tuple[str, list[str]]:
         env[match[1]] = match[2][1:-1].replace('""', '"')
         index += 1
     tail = lines[index:]
-    mismatch = _tail_mismatch(tail, waits)
+    run_at = len(_LAUNCHER_TAIL) - 1
+    end_at = -1 - len(TASK_RETRY_END)  # before WScript.Quit
+    shape = _WAITING_LAUNCHER_TAIL if waits else _LAUNCHER_TAIL
+    retries = waits and tail[run_at:run_at + 1] == [TASK_RETRY_BEGIN[0]]
+    if retries:
+        shape = (*shape[:run_at], *TASK_RETRY_BEGIN, *shape[run_at:-1], *TASK_RETRY_END, shape[-1])
+    elif require_task_retry:
+        _unverified("the scheduled action requests retries from an unrecognized launcher")
+    mismatch = _tail_mismatch(tail, shape)
     if mismatch is not None:
         index += mismatch
         line = _masked_literals(lines[index]) if index < len(lines) else "<end of file>"
         _unverified(f"launcher line {index + 1} is not the installer's: {line[:120]!r}")
+    if retries:
+        tail = tail[:run_at] + tail[run_at + len(TASK_RETRY_BEGIN):end_at] + tail[-1:]
     if not re.fullmatch(r'  env.Item\("PYTHONPATH"\) = ' + literal + r' & existing_pp', tail[2]) or not re.fullmatch(r'  env.Item\("PYTHONPATH"\) = ' + literal, tail[4]):
         _unverified("the launcher's PYTHONPATH lines are not the installer's")
     if not re.fullmatch(r'sh.CurrentDirectory = ' + literal, tail[6]):
@@ -458,12 +476,12 @@ def verify_windows_task(xml: str | bytes, home: Path, account: str, sid: str) ->
     if action.tag != '{' + ns['t'] + '}Exec' or action.findtext('t:Command', '', ns).lower() not in {"wscript.exe", r"c:\windows\system32\wscript.exe"}:
         _unverified(f"the task runs {action.findtext('t:Command', '', ns) or action.tag!r}, not wscript.exe")
     args = action.findtext("t:Arguments", "", ns)
-    match = re.fullmatch(r'//B //Nologo "([^"\r\n]+)"', args)
+    match = re.fullmatch(r'//B //Nologo "([^"\r\n]+)"( --retry-task)?', args)
     if not match:
         _unverified(f"the task arguments are {args!r}, not //B //Nologo \"<launcher>\"")
     script = _absolute(match[1])
     if script.suffix.lower() != '.vbs':
         _unverified(f"the task runs {script.name}, not a .vbs launcher")
-    configured, argv = _vbs_identity(launcher_text(read_definition(script)))
+    configured, argv = _vbs_identity(launcher_text(read_definition(script)), require_task_retry=bool(match[2]))
     verify_home(home, configured)
     verify_gateway_argv(argv, home)

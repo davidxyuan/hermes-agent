@@ -31,13 +31,21 @@ def _pre_146976(script: str) -> str:
 
 
 @pytest.mark.platforms("any")
-def test_both_installer_generations_verify(tmp_path, monkeypatch):
-    """The ownership check accepts the waiting launcher AND the one existing installs still run."""
+def test_installer_generations_verify(tmp_path, monkeypatch):
     home, script = _launcher(tmp_path, monkeypatch, tmp_path / "python.exe")
-    for text in (script, _pre_146976(script)):
+    # Reconstruct the previous waiting template, then its earlier fire-and-forget version.
+    lines = script.splitlines(keepends=True)
+    loop = lines.index("Dim attempt, attempts\r\n")
+    run = next(i for i, line in enumerate(lines) if line.startswith("code = sh.Run"))
+    stop = lines.index("If code = 0 Then Exit For\r\n")
+    previous = "".join(lines[:loop] + lines[run:stop] + lines[lines.index("Next\r\n") + 1:])
+    for text in (script, previous, _pre_146976(previous)):
         configured, argv = _vbs_identity(text)
         assert configured == str(home)
         assert argv[0] == str(tmp_path / "python.exe") and argv[-2:] == ["gateway", "run"]
+    assert _vbs_identity(script, require_task_retry=True) == _vbs_identity(previous)
+    with pytest.raises(ValueError):
+        _vbs_identity(previous, require_task_retry=True)
 
 
 @pytest.mark.platforms("any")
@@ -45,6 +53,8 @@ def test_both_installer_generations_verify(tmp_path, monkeypatch):
     lambda s: s.replace("WScript.Quit code", "WScript.Quit 0"),
     lambda s: s.replace("If code = 78 Then code = 0", "If code <> 0 Then code = 0"),
     lambda s: s.replace("gateway.pid", "other.pid"),
+    lambda s: s.replace("WScript.Sleep 60000", "WScript.Sleep 1"),
+    lambda s: s.replace("--retry-task", "--other-argument"),
     lambda s: s.replace("\r\nWScript.Quit code", ""),
 ])
 def test_an_edited_exit_mapping_is_not_the_installers(tmp_path, monkeypatch, edit):
